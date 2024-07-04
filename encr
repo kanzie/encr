@@ -1,0 +1,146 @@
+#!/bin/bash
+
+# Default input file
+input_file="address.txt"
+message=""
+output_file="output.txt.asc"
+verbose=false
+extra_step_taken=false
+
+# Function to display usage information
+usage() {
+  echo "Usage: encr <recipient> [-f <filename>] [-m <message>] [-o <outputfile>] [-v]"
+  echo "  -f <filename>     Specify the input file to encrypt (default: address.txt)"
+  echo "  -m <message>      Specify the message to encrypt (overrides input file)"
+  echo "  -o <outputfile>   Specify the output file name (default: output.txt.asc)"
+  echo "  -v                Enable verbose mode"
+  echo "  -h                Display this help message"
+}
+
+# Function to check if a command exists
+command_exists() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+# Check if gpg is installed
+if ! command_exists gpg; then
+  echo "Error: gpg is not installed."
+  echo "Please install gpg using the following command:"
+  echo "  sudo apt-get install gnupg    # For Debian/Ubuntu"
+  echo "  brew install gnupg            # For macOS"
+  echo "  sudo yum install gnupg        # For CentOS/RHEL"
+  exit 1
+fi
+
+# Check if expect is installed
+if ! command_exists expect; then
+  echo "Error: expect is not installed."
+  echo "Please install expect using the following command:"
+  echo "  sudo apt-get install expect    # For Debian/Ubuntu"
+  echo "  brew install expect            # For macOS"
+  echo "  sudo yum install expect        # For CentOS/RHEL"
+  exit 1
+fi
+
+# Parse options
+while getopts ":f:m:o:vh" opt; do
+  case ${opt} in
+    f )
+      input_file=$OPTARG
+      ;;
+    m )
+      message=$OPTARG
+      ;;
+    o )
+      output_file=$OPTARG
+      ;;
+    v )
+      verbose=true
+      ;;
+    h )
+      usage
+      exit 0
+      ;;
+    \? )
+      echo "Invalid option: -$OPTARG" >&2
+      usage
+      exit 1
+      ;;
+    : )
+      echo "Option -$OPTARG requires an argument." >&2
+      usage
+      exit 1
+      ;;
+  esac
+done
+shift $((OPTIND -1))
+
+# Check if recipient is provided
+if [ -z "$1" ]; then
+  echo "Recipient is required."
+  usage
+  exit 1
+fi
+
+recipient=$1
+
+# Check if the key is usable
+if ! gpg --list-keys "$recipient" > /dev/null 2>&1; then
+  echo "Key for recipient $recipient not found. Please ensure the key is imported."
+  exit 1
+fi
+
+# Check if the key is trusted
+key_info=$(gpg --list-keys --with-colons "$recipient" | grep "^pub")
+if [[ ! "$key_info" =~ ^pub:[a-zA-Z0-9]+:([0-9]): ]]; then
+  echo "Failed to retrieve key information for $recipient."
+  exit 1
+fi
+key_trust_level=${BASH_REMATCH[1]}
+
+# If the key is not trusted, set the trust level
+if [ "$key_trust_level" -lt 4 ]; then
+  extra_step_taken=true
+  # Run gpg --edit-key commands to set trust level
+  expect << EOF
+spawn gpg --edit-key "$recipient"
+expect "gpg>"
+send "trust\r"
+expect "Your decision? "
+send "5\r"
+expect "gpg>"
+send "quit\r"
+expect eof
+EOF
+fi
+
+# Build the GPG command
+gpg_command="gpg --encrypt --recipient $recipient --armor -o $output_file"
+
+# Add silent options unless verbose mode is specified
+if [ "$verbose" = false ]; then
+  gpg_command="$gpg_command --batch --yes --quiet"
+fi
+
+# Encrypt the file or message
+if [ -n "$message" ]; then
+  echo "$message" | eval "$gpg_command"
+  if [ "$verbose" = true ]; then
+    echo "Message encrypted as $output_file"
+  fi
+else
+  if [ ! -f "$input_file" ]; then
+    echo "Input file $input_file not found."
+    exit 1
+  fi
+  eval "$gpg_command $input_file"
+  if [ "$verbose" = true ]; then
+    echo "File $input_file encrypted as $output_file"
+  fi
+fi
+
+# Notify if an extra step was taken
+if [ "$extra_step_taken" = true ]; then
+  echo "The trust level of the key was automatically adjusted."
+fi
+
